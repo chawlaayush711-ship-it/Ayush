@@ -229,7 +229,13 @@ const AlertsView = ({ user, theme, t, onSelectGroup }: { user: User, theme: any,
     const fetchAlerts = async () => {
       try {
         const res = await fetch(`/api/groups?userId=${user.id}`);
-        const groups: Group[] = await res.json();
+        const data = await res.json();
+        
+        if (!res.ok) {
+          throw new Error(data.error || "Failed to fetch groups");
+        }
+
+        const groups: Group[] = Array.isArray(data) ? data : [];
         
         const newAlerts: any[] = [];
         const today = new Date();
@@ -375,16 +381,17 @@ const Dashboard = ({ user, onSelectGroup, onCreateGroup, theme, t }: { user: Use
     setLoading(true);
     setError(null);
     fetch(`/api/groups?userId=${user.id}`)
-      .then(res => {
-        if (!res.ok) throw new Error("Failed to fetch");
-        return res.json();
+      .then(async res => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to fetch");
+        return data;
       })
       .then(data => {
-        setGroups(data);
+        setGroups(Array.isArray(data) ? data : []);
       })
       .catch(err => {
         console.error("Dashboard fetch error:", err);
-        setError("Failed to load your groups. Please try again.");
+        setError(err.message || "Failed to load your groups. Please try again.");
       })
       .finally(() => {
         setLoading(false);
@@ -614,7 +621,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
   const [group, setGroup] = useState(initialGroup);
   const [details, setDetails] = useState<any>(null);
   const [payments, setPayments] = useState<Payment[]>([]);
-  const [activeTab, setActiveTab] = useState<'overview' | 'members' | 'ledger' | 'insights'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'members' | 'ledger' | 'insights' | 'schedule'>('overview');
   const [showAddMember, setShowAddMember] = useState(false);
   const [editingMember, setEditingMember] = useState<any>(null);
   const [selectedMonthIndex, setSelectedMonthIndex] = useState(0);
@@ -631,8 +638,9 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
   const [isSyncing, setIsSyncing] = useState(false);
 
   const [ledgerView, setLedgerView] = useState<'grid' | 'list'>('grid');
-  const [ledgerFilter, setLedgerFilter] = useState<'all' | 'paid' | 'pending'>('all');
+  const [ledgerFilter, setLedgerFilter] = useState<'all' | 'paid' | 'pending' | 'late'>('all');
   const [ledgerSort, setLedgerSort] = useState<'name' | 'date'>('name');
+  const [scheduleView, setScheduleView] = useState<'timeline' | 'calendar'>('timeline');
 
   useEffect(() => {
     if (!group.id) return;
@@ -897,6 +905,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
             { id: 'overview', label: t.payments, icon: Wallet },
             { id: 'members', label: t.membersTab, icon: Users },
             { id: 'ledger', label: 'Ledger', icon: TrendingUp },
+            { id: 'schedule', label: 'Schedule', icon: Calendar },
             { id: 'insights', label: 'AI Insights', icon: Sparkles }
           ].map((tab) => (
             <button
@@ -1399,6 +1408,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
                       const p = payments.find(pay => pay.membership_id === m.id && pay.month_index === month.index);
                       return {
                         ...p,
+                        membership_id: m.id,
                         member_name: m.name,
                         member_phone: m.phone,
                         month_name: month.name,
@@ -1458,6 +1468,150 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
                     </motion.div>
                   ));
                 })()}
+              </div>
+            )}
+          </motion.div>
+        )}
+
+        {activeTab === 'schedule' && (
+          <motion.div 
+            key="schedule"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="space-y-6"
+          >
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <h3 className="font-bold text-stone-900 font-display">Group Schedule</h3>
+              <div className="flex items-center gap-2">
+                <div className="bg-stone-100 p-1 rounded-xl flex gap-1">
+                  <button 
+                    onClick={() => setScheduleView('timeline')}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-all ${scheduleView === 'timeline' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-400'}`}
+                  >
+                    Timeline
+                  </button>
+                  <button 
+                    onClick={() => setScheduleView('calendar')}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-all ${scheduleView === 'calendar' ? 'bg-white shadow-sm text-stone-900' : 'text-stone-400'}`}
+                  >
+                    Calendar
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {scheduleView === 'timeline' ? (
+              <div className="relative space-y-8 before:absolute before:inset-0 before:ml-5 before:-translate-x-px before:h-full before:w-0.5 before:bg-gradient-to-b before:from-stone-200 before:via-stone-200 before:to-transparent">
+                {months.map((m, i) => {
+                  const isPast = i < selectedMonthIndex;
+                  const isCurrent = i === selectedMonthIndex;
+                  const payoutMember = details?.members?.find((member: any) => member.payout_month_index === i);
+                  
+                  return (
+                    <div key={m.index} className="relative flex items-start gap-6 group">
+                      <div className={`absolute left-0 w-10 h-10 rounded-2xl flex items-center justify-center z-10 transition-all shadow-sm ${
+                        isPast ? 'bg-stone-100 text-stone-400' : 
+                        isCurrent ? `${theme.color} text-white scale-110 shadow-lg ${theme.shadow}` : 
+                        'bg-white border border-stone-200 text-stone-400'
+                      }`}>
+                        {isPast ? <Check className="w-5 h-5" /> : <span className="text-xs font-black">{i + 1}</span>}
+                      </div>
+                      
+                      <div className="ml-14 flex-1">
+                        <div className={`bg-white p-5 rounded-3xl border transition-all ${
+                          isCurrent ? `${theme.border} shadow-md` : 'border-stone-100'
+                        }`}>
+                          <div className="flex justify-between items-start mb-3">
+                            <div>
+                              <h4 className={`font-bold ${isCurrent ? theme.text : 'text-stone-900'}`}>{m.name}</h4>
+                              <p className="text-[10px] text-stone-400 font-bold uppercase tracking-wider">
+                                Deadline: {group.payout_day}th {m.name.split(' ')[0]}
+                              </p>
+                            </div>
+                            {isCurrent && (
+                              <span className={`text-[8px] font-black uppercase px-2 py-1 rounded-lg ${theme.light} ${theme.text}`}>
+                                Active Month
+                              </span>
+                            )}
+                          </div>
+                          
+                          <div className="flex items-center gap-4 p-3 bg-stone-50 rounded-2xl border border-stone-100">
+                            <div className={`w-8 h-8 ${theme.light} rounded-xl flex items-center justify-center text-[10px] font-black ${theme.text}`}>
+                              {payoutMember ? (details.members.findIndex((mem: any) => mem.id === payoutMember.id) + 1) : '?'}
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-xs font-bold text-stone-900">{payoutMember ? payoutMember.name : 'Unassigned'}</p>
+                              <p className="text-[10px] text-stone-400">Receives ₹{(group.contribution_amount * group.total_members).toLocaleString()}</p>
+                            </div>
+                            {payoutMember && (
+                              <button 
+                                onClick={() => {
+                                  const msg = `Hi ${payoutMember.name}, you are scheduled for the payout of ₹${(group.contribution_amount * group.total_members).toLocaleString()} this month (${m.name}) in our ${group.name} group.`;
+                                  window.open(`https://wa.me/${payoutMember.phone.replace(/\D/g, '')}?text=${encodeURIComponent(msg)}`);
+                                }}
+                                className="p-2 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all"
+                              >
+                                <MessageSquare className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {months.map((m, i) => {
+                  const isPast = i < selectedMonthIndex;
+                  const isCurrent = i === selectedMonthIndex;
+                  const payoutMember = details?.members?.find((member: any) => member.payout_month_index === i);
+                  
+                  return (
+                    <motion.div 
+                      key={`cal-${m.index}`}
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ delay: i * 0.03 }}
+                      className={`bg-white p-5 rounded-3xl border transition-all ${
+                        isCurrent ? `${theme.border} ring-2 ring-offset-2 ${theme.ring.replace('focus:', '')}` : 'border-stone-100'
+                      } ${isPast ? 'opacity-60' : ''}`}
+                    >
+                      <div className="flex justify-between items-start mb-4">
+                        <div className={`w-10 h-10 rounded-2xl flex items-center justify-center font-black text-sm ${
+                          isPast ? 'bg-stone-100 text-stone-400' : 
+                          isCurrent ? `${theme.color} text-white` : 
+                          'bg-stone-50 text-stone-400'
+                        }`}>
+                          {i + 1}
+                        </div>
+                        <div className="text-right">
+                          <h4 className="font-bold text-stone-900">{m.name.split(' ')[0]}</h4>
+                          <p className="text-[10px] text-stone-400 font-bold uppercase">{m.name.split(' ')[1]}</p>
+                        </div>
+                      </div>
+                      
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider">
+                          <span className="text-stone-400">Deadline</span>
+                          <span className="text-stone-900">{group.payout_day}th</span>
+                        </div>
+                        <div className="h-px bg-stone-50" />
+                        <div className="flex items-center gap-3">
+                          <div className={`w-6 h-6 ${theme.light} rounded-lg flex items-center justify-center text-[8px] font-black ${theme.text}`}>
+                            {payoutMember ? (details.members.findIndex((mem: any) => mem.id === payoutMember.id) + 1) : '?'}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[10px] font-bold text-stone-900 truncate">{payoutMember ? payoutMember.name : 'Unassigned'}</p>
+                            <p className="text-[8px] text-stone-400 uppercase">Payout</p>
+                          </div>
+                        </div>
+                      </div>
+                    </motion.div>
+                  );
+                })}
               </div>
             )}
           </motion.div>
@@ -1748,6 +1902,8 @@ const CreateGroup = ({ user, onCancel, onSuccess, theme, t }: { user: User, onCa
   const [membersCount, setMembersCount] = useState(10);
   const [payoutDay, setPayoutDay] = useState("15");
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [memberInputs, setMemberInputs] = useState([
     { name: user.name, phone: user.phone, isYou: true },
     { name: "", phone: "" }
@@ -1767,40 +1923,56 @@ const CreateGroup = ({ user, onCancel, onSuccess, theme, t }: { user: User, onCa
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const res = await fetch("/api/groups", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name,
-        description,
-        contributionAmount: amount,
-        interestRate,
-        totalMembers: membersCount,
-        startDate: date,
-        payoutDay: parseInt(payoutDay),
-        adminId: user.id
-      }),
-    });
-    
-    if (res.ok) {
-      const { id: groupId } = await res.json();
+    setLoading(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          description,
+          contributionAmount: amount,
+          interestRate,
+          totalMembers: membersCount,
+          startDate: date,
+          payoutDay: parseInt(payoutDay),
+          adminId: user.id
+        }),
+      });
       
-      // Add other members (skipping the first one which is "You" and already added by backend)
-      const otherMembers = memberInputs.slice(1).filter(m => m.name.trim() !== "");
-      
-      for (let i = 0; i < otherMembers.length; i++) {
-        await fetch(`/api/groups/${groupId}/members`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: otherMembers[i].name,
-            phone: otherMembers[i].phone || `999000${Math.floor(Math.random() * 10000)}`, // Fallback if phone is optional
-            payoutMonthIndex: i + 1
-          }),
-        });
+      if (res.ok) {
+        const { id: groupId } = await res.json();
+        
+        // Add other members (skipping the first one which is "You" and already added by backend)
+        const otherMembers = memberInputs.slice(1).filter(m => m.name.trim() !== "");
+        
+        for (let i = 0; i < otherMembers.length; i++) {
+          const mRes = await fetch(`/api/groups/${groupId}/members`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: otherMembers[i].name,
+              phone: otherMembers[i].phone || `999000${Math.floor(Math.random() * 10000)}`, // Fallback if phone is optional
+              payoutMonthIndex: i + 1
+            }),
+          });
+          if (!mRes.ok) {
+            const mErr = await mRes.json();
+            console.warn("Failed to add member:", mErr.error);
+          }
+        }
+        
+        onSuccess();
+      } else {
+        const errData = await res.json();
+        setError(errData.error || "Failed to create group");
       }
-      
-      onSuccess();
+    } catch (err: any) {
+      setError(err.message || "An unexpected error occurred");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -1809,11 +1981,21 @@ const CreateGroup = ({ user, onCancel, onSuccess, theme, t }: { user: User, onCa
   return (
     <div className="min-h-screen bg-stone-50 pb-32">
       <div className="bg-white border-b border-stone-100 p-6 sticky top-0 z-10 shadow-sm">
-        <div className="flex items-center gap-4">
-          <button onClick={onCancel} className="p-2 hover:bg-stone-100 rounded-xl transition-colors">
-            <ArrowLeft className="w-6 h-6" />
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <button onClick={onCancel} className="p-2 hover:bg-stone-100 rounded-xl transition-colors">
+              <ArrowLeft className="w-6 h-6 text-stone-600" />
+            </button>
+            <h2 className="text-xl font-bold text-stone-900 font-display">{t.newGroup}</h2>
+          </div>
+          <button 
+            onClick={handleSubmit}
+            disabled={loading || !name}
+            className={`px-6 py-2 ${theme.color} text-white rounded-xl font-bold shadow-lg ${theme.shadow} disabled:opacity-50 disabled:shadow-none transition-all flex items-center gap-2`}
+          >
+            {loading && <RefreshCw className="w-4 h-4 animate-spin" />}
+            {t.create}
           </button>
-          <h2 className="text-xl font-bold font-display">{t.newGroup}</h2>
         </div>
       </div>
 
@@ -1823,6 +2005,12 @@ const CreateGroup = ({ user, onCancel, onSuccess, theme, t }: { user: User, onCa
         onSubmit={handleSubmit} 
         className="p-6 max-w-2xl mx-auto space-y-8"
       >
+        {error && (
+          <div className="p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-3 text-red-600 text-sm">
+            <AlertCircle className="w-5 h-5 shrink-0" />
+            <p className="font-medium">{error}</p>
+          </div>
+        )}
         <div className="space-y-6">
           <motion.div variants={{ hidden: { opacity: 0, y: 10 }, show: { opacity: 1, y: 0 } }}>
             <label className="block text-xs font-bold text-stone-400 uppercase tracking-widest mb-2">Group Name</label>
@@ -2064,8 +2252,81 @@ const Assistant = ({ user }: { user: User }) => {
   );
 };
 
-const SettingsView = ({ user, onLogout, onDeleteAccount, onBack, language, setLanguage, theme, setThemeId, t }: { user: User, onLogout: () => void, onDeleteAccount: () => void, onBack: () => void, language: Language, setLanguage: (l: any) => void, theme: any, setThemeId: (id: string) => void, t: any }) => {
+const SettingsView = ({ user, onLogout, onDeleteAccount, onBack, language, setLanguage, theme, setThemeId, t, deferredPrompt, isInstalled, setDeferredPrompt }: { user: User, onLogout: () => void, onDeleteAccount: () => void, onBack: () => void, language: Language, setLanguage: (l: any) => void, theme: any, setThemeId: (id: string) => void, t: any, deferredPrompt: any, isInstalled: boolean, setDeferredPrompt: (p: any) => void }) => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  const downloadPRD = () => {
+    const doc = new jsPDF();
+    const prdContent = `
+# Product Requirements Document: Bhishi PWA
+
+## 1. Project Overview
+Bhishi is a community-driven financial management platform designed to digitize traditional "Chit Fund" or "ROSCAs" (Rotating Savings and Credit Associations). It simplifies the complex task of tracking monthly contributions, managing payout rotations, and ensuring transparency among community members.
+
+---
+
+## 2. User Flow & Navigation
+1. Onboarding: User enters Name & Phone -> System verifies/creates account -> User lands on Dashboard.
+2. Creation: User clicks "New Group" -> Fills details (Amount, Members, Date) -> Adds members -> Group is initialized with a 12-month schedule.
+3. Management: User selects a Group -> Views monthly status -> Marks payments as "Paid" -> Views who is receiving the payout this month.
+4. Settings: User toggles Language (EN/HI/MR) -> Selects Theme -> Enables Push Notifications -> Exports/Restores data.
+
+---
+
+## 3. Detailed Page Breakdown
+
+### A. Authentication / Landing Page
+* Purpose: Entry point for users.
+* Components: AuthView, Input, Button.
+* Logic: Checks localStorage for an existing session.
+
+### B. Main Dashboard
+* Purpose: High-level overview of all financial commitments.
+* Components: StatsCard, GroupCard, AlertsBanner, BottomNav.
+
+### C. Group Detail View
+* Purpose: Granular management of a specific Bhishi group.
+* Sections: Header, Month Selector, Payout Info, Member List.
+
+### D. Create Group View
+* Purpose: Step-by-step wizard to initialize a new association.
+* Form Fields: Basic Info, Schedule, Members.
+
+### E. Settings & Profile View
+* Purpose: Personalization and data management.
+* Features: Theme Picker, Language Toggle, Notification Toggle, Data Tools.
+
+---
+
+## 4. Component Library (Frontend)
+* Button: High-impact action button.
+* Card: Container with rounded-3xl.
+* ProgressBar: Visual indicator of group completion.
+* Modal: Animated overlay for confirmations.
+* EmptyState: Illustrated view when no groups exist.
+
+---
+
+## 5. Technical Architecture
+* Frontend: React 18+ with TypeScript, Vite, and Tailwind CSS.
+* PWA: manifest.json and Service Worker.
+* Backend: Node.js with Express.
+* Database: SQLite using better-sqlite3.
+* Cron Jobs: node-cron for daily reminders.
+
+---
+
+## 6. Production Checklist
+1. VAPID Keys for notifications.
+2. SSL (required for Service Workers).
+3. Error Logging for debugging.
+4. Responsive Design for all devices.
+    `;
+    
+    const splitText = doc.splitTextToSize(prdContent, 180);
+    doc.text(splitText, 15, 15);
+    doc.save("Bhishi_PRD.pdf");
+  };
 
   const handleDelete = async () => {
     const res = await fetch(`/api/users/${user.id}`, { method: 'DELETE' });
@@ -2131,6 +2392,61 @@ const SettingsView = ({ user, onLogout, onDeleteAccount, onBack, language, setLa
           </div>
         </div>
 
+        {/* Notifications */}
+        <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-sm">
+          <div className="flex items-center gap-3 mb-4">
+            <Bell className={`w-5 h-5 ${theme.text}`} />
+            <h3 className="font-bold">Notifications</h3>
+          </div>
+          <p className="text-sm text-stone-500 mb-6">Get reminders for contribution deadlines and payout dates.</p>
+          <button
+            onClick={async () => {
+              if (!('Notification' in window)) {
+                alert("This browser does not support desktop notification");
+              } else if (Notification.permission === "granted") {
+                alert("Notifications already enabled!");
+              } else {
+                const permission = await Notification.requestPermission();
+                if (permission === "granted") {
+                  window.location.reload(); // Reload to trigger subscription logic in App
+                }
+              }
+            }}
+            className={`w-full py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-2 ${Notification.permission === 'granted' ? 'bg-stone-50 text-stone-400' : `${theme.color} text-white shadow-lg ${theme.shadow}`}`}
+          >
+            {Notification.permission === 'granted' ? (
+              <><CheckCircle2 className="w-5 h-5" /> Notifications Enabled</>
+            ) : (
+              <><Smartphone className="w-5 h-5" /> Enable Push Notifications</>
+            )}
+          </button>
+        </div>
+
+        {/* PWA Installation */}
+        {!isInstalled && deferredPrompt && (
+          <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-sm">
+            <div className="flex items-center gap-3 mb-4">
+              <Download className={`w-5 h-5 ${theme.text}`} />
+              <h3 className="font-bold">Install App</h3>
+            </div>
+            <p className="text-sm text-stone-500 mb-6">Install Bhishi on your home screen for quick access and offline use.</p>
+            <button
+              onClick={async () => {
+                if (deferredPrompt) {
+                  deferredPrompt.prompt();
+                  const { outcome } = await deferredPrompt.userChoice;
+                  if (outcome === 'accepted') {
+                    setDeferredPrompt(null);
+                  }
+                }
+              }}
+              className={`w-full py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-2 ${theme.color} text-white shadow-lg ${theme.shadow}`}
+            >
+              <Plus className="w-5 h-5" /> Install Now
+            </button>
+          </div>
+        )}
+
         {/* Cloud Backup & Sync */}
         <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-sm">
           <div className="flex items-center gap-3 mb-4">
@@ -2189,6 +2505,21 @@ const SettingsView = ({ user, onLogout, onDeleteAccount, onBack, language, setLa
               />
             </label>
           </div>
+        </div>
+
+        {/* Developer Resources */}
+        <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-sm">
+          <div className="flex items-center gap-3 mb-4">
+            <Sparkles className={`w-5 h-5 ${theme.text}`} />
+            <h3 className="font-bold">Developer Resources</h3>
+          </div>
+          <p className="text-sm text-stone-500 mb-6">Download the detailed Product Requirements Document (PRD) for this application.</p>
+          <button 
+            onClick={downloadPRD}
+            className={`w-full py-4 rounded-2xl font-bold transition-all flex items-center justify-center gap-2 ${theme.color} text-white shadow-lg ${theme.shadow}`}
+          >
+            <Download className="w-5 h-5" /> Download PRD (PDF)
+          </button>
         </div>
 
         {/* Danger Zone */}
@@ -2253,6 +2584,22 @@ const SettingsView = ({ user, onLogout, onDeleteAccount, onBack, language, setLa
   );
 };
 
+// --- Helpers ---
+function urlBase64ToUint8Array(base64String: string) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding)
+    .replace(/\-/g, '+')
+    .replace(/_/g, '/');
+
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
 export default function App() {
   const [user, setUser] = useState<User | null>(() => {
     const saved = localStorage.getItem("bhishi_user");
@@ -2262,6 +2609,8 @@ export default function App() {
   const [selectedGroup, setSelectedGroup] = useState<Group | null>(null);
   const [language, setLanguage] = useState<Language>('en');
   const [themeId, setThemeId] = useState(() => localStorage.getItem('theme') || 'emerald');
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [isInstalled, setIsInstalled] = useState(false);
   
   const theme = THEMES.find(t => t.id === themeId) || THEMES[0];
   const t = translations[language];
@@ -2269,6 +2618,83 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('theme', themeId);
   }, [themeId]);
+
+  // Verify user on startup
+  useEffect(() => {
+    if (user) {
+      fetch(`/api/auth/verify/${user.id}`).then(res => {
+        if (!res.ok) {
+          handleLogout();
+        }
+      }).catch(() => {
+        // If server is down, don't logout, just wait
+      });
+    }
+  }, []);
+
+  // PWA Install Prompt
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e: any) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+
+    const handleAppInstalled = () => {
+      setIsInstalled(true);
+      setDeferredPrompt(null);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    if (window.matchMedia('(display-mode: standalone)').matches) {
+      setIsInstalled(true);
+    }
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
+
+  // Push Notifications Subscription
+  useEffect(() => {
+    if (user && 'serviceWorker' in navigator && 'PushManager' in window) {
+      registerAndSubscribe();
+    }
+  }, [user]);
+
+  const registerAndSubscribe = async () => {
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      console.log('Service Worker registered');
+
+      const res = await fetch('/api/push/vapid-public-key');
+      const { publicKey } = await res.json();
+
+      if (!publicKey) {
+        console.warn('VAPID public key not found on server');
+        return;
+      }
+
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey)
+      });
+
+      await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user?.id,
+          subscription
+        })
+      });
+      console.log('User subscribed to push notifications');
+    } catch (error) {
+      console.error('Failed to subscribe to push notifications:', error);
+    }
+  };
 
   const handleLogout = () => {
     localStorage.removeItem("bhishi_user");
@@ -2319,6 +2745,9 @@ export default function App() {
                     theme={theme}
                     setThemeId={setThemeId}
                     t={t}
+                    deferredPrompt={deferredPrompt}
+                    isInstalled={isInstalled}
+                    setDeferredPrompt={setDeferredPrompt}
                   />
                 </motion.div>
               )}

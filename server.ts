@@ -1,134 +1,132 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import Database from "better-sqlite3";
+import { createClient } from "@supabase/supabase-js";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
+import webpush from "web-push";
+import cron from "node-cron";
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("bhishi.db");
+// Initialize Supabase Client
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
 
-// Initialize Database Schema
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    phone TEXT UNIQUE NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+let supabase: any = null;
 
-  CREATE TABLE IF NOT EXISTS groups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    contribution_amount REAL NOT NULL,
-    total_members INTEGER NOT NULL,
-    start_date DATE NOT NULL,
-    payout_day INTEGER DEFAULT 15,
-    description TEXT,
-    interest_rate REAL DEFAULT 0,
-    status TEXT DEFAULT 'active', -- active, completed
-    admin_id INTEGER,
-    FOREIGN KEY (admin_id) REFERENCES users(id)
-  );
+if (supabaseUrl && supabaseKey) {
+  try {
+    supabase = createClient(supabaseUrl, supabaseKey);
+    console.log("Supabase client initialized successfully.");
+  } catch (e) {
+    console.error("Failed to initialize Supabase client:", e);
+  }
+} else {
+  console.error("SUPABASE_URL and SUPABASE_KEY are required in .env file.");
+}
 
-  CREATE TABLE IF NOT EXISTS memberships (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    group_id INTEGER,
-    role TEXT DEFAULT 'member', -- admin, member
-    payout_month_index INTEGER, -- 0 to N-1
-    status TEXT DEFAULT 'active', -- active, dropped
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (group_id) REFERENCES groups(id)
-  );
+// Configure web-push
+const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
+const vapidPrivateKey = process.env.VAPID_PRIVATE_KEY;
+const vapidSubject = process.env.VAPID_SUBJECT || "mailto:example@example.com";
 
-  CREATE TABLE IF NOT EXISTS payments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    membership_id INTEGER,
-    month_index INTEGER,
-    amount REAL NOT NULL,
-    status TEXT DEFAULT 'pending', -- pending, paid, late
-    paid_at DATETIME,
-    FOREIGN KEY (membership_id) REFERENCES memberships(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS payouts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    membership_id INTEGER,
-    month_index INTEGER,
-    amount REAL NOT NULL,
-    status TEXT DEFAULT 'scheduled', -- scheduled, paid
-    paid_at DATETIME,
-    FOREIGN KEY (membership_id) REFERENCES memberships(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS month_status (
-    group_id INTEGER,
-    month_index INTEGER,
-    status TEXT DEFAULT 'open', -- open, frozen
-    PRIMARY KEY (group_id, month_index),
-    FOREIGN KEY (group_id) REFERENCES groups(id)
-  );
-`);
-
-// Migration: Add payout_day to groups if it doesn't exist
-try {
-  db.prepare("ALTER TABLE groups ADD COLUMN payout_day INTEGER DEFAULT 15").run();
-} catch (e) {}
-
-try {
-  db.prepare("ALTER TABLE groups ADD COLUMN description TEXT").run();
-} catch (e) {}
-
-try {
-  db.prepare("ALTER TABLE groups ADD COLUMN interest_rate REAL DEFAULT 0").run();
-} catch (e) {}
-
-try {
-  db.prepare("ALTER TABLE payments ADD COLUMN payment_method TEXT").run();
-} catch (e) {}
-
-// --- Pre-prepared Statements ---
-let loginStmt: any;
-let createUserStmt: any;
-let getGroupsStmt: any;
+if (vapidPublicKey && vapidPrivateKey) {
+  webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
+  console.log("Web-push configured successfully.");
+} else {
+  console.warn("VAPID keys are missing. Push notifications will not work.");
+}
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Prepare statements once
-  loginStmt = db.prepare("SELECT * FROM users WHERE phone = ?");
-  createUserStmt = db.prepare("INSERT INTO users (name, phone) VALUES (?, ?)");
-  getGroupsStmt = db.prepare(`
-    SELECT g.*, m.role, m.payout_month_index 
-    FROM groups g
-    JOIN memberships m ON g.id = m.group_id
-    WHERE m.user_id = ?
-  `);
-
   app.use(express.json());
+
+  // Middleware to check Supabase configuration
+  app.use("/api", (req, res, next) => {
+    if (!supabase) {
+      return res.status(500).json({ 
+        error: "Supabase is not configured. Please add SUPABASE_URL and SUPABASE_KEY to your secrets." 
+      });
+    }
+    next();
+  });
 
   // --- API Routes ---
 
+  app.get("/api/push/vapid-public-key", (req, res) => {
+    res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
+  });
+
+  app.post("/api/push/subscribe", async (req, res) => {
+    const { userId, subscription } = req.body;
+    if (!userId || !subscription) {
+      return res.status(400).json({ error: "userId and subscription are required" });
+    }
+
+    try {
+      // Check if subscription already exists
+      const { data: existing } = await supabase
+        .from("push_subscriptions")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("subscription", subscription)
+        .maybeSingle();
+
+      if (!existing) {
+        await supabase
+          .from("push_subscriptions")
+          .insert({ user_id: userId, subscription });
+      }
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/push/unsubscribe", async (req, res) => {
+    const { userId, subscription } = req.body;
+    try {
+      await supabase
+        .from("push_subscriptions")
+        .delete()
+        .eq("user_id", userId)
+        .eq("subscription", subscription);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Auth / User
-  app.post("/api/auth/login", (req, res) => {
+  app.post("/api/auth/login", async (req, res) => {
     try {
       const { phone, name } = req.body;
       if (!phone || !name) {
         return res.status(400).json({ error: "Name and phone are required." });
       }
       
-      let user = loginStmt.get(phone);
+      let { data: user } = await supabase
+        .from("users")
+        .select("*")
+        .eq("phone", phone)
+        .maybeSingle();
       
       if (!user) {
-        const info = createUserStmt.run(name, phone);
-        user = { id: info.lastInsertRowid, name, phone };
+        const { data: newUser, error } = await supabase
+          .from("users")
+          .insert({ name, phone })
+          .select()
+          .single();
+        
+        if (error) throw error;
+        user = newUser;
       }
       
       res.json(user);
@@ -137,184 +135,199 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/users/:id", (req, res) => {
-    const userId = req.params.id;
-    
-    const transaction = db.transaction(() => {
-      // 1. Find all groups where this user is the admin
-      const adminGroups = db.prepare("SELECT id FROM groups WHERE admin_id = ?").all(userId) as any[];
+  app.get("/api/auth/verify/:id", async (req, res) => {
+    const { data: user } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", req.params.id)
+      .maybeSingle();
       
-      for (const group of adminGroups) {
-        const groupId = group.id;
-        // Full group deletion logic for each group they admin
-        const memberships = db.prepare("SELECT id FROM memberships WHERE group_id = ?").all(groupId) as any[];
-        const membershipIds = memberships.map(m => m.id);
+    if (user) {
+      res.json(user);
+    } else {
+      res.status(404).json({ error: "User not found" });
+    }
+  });
 
-        if (membershipIds.length > 0) {
-          const placeholders = membershipIds.map(() => "?").join(",");
-          db.prepare(`DELETE FROM payments WHERE membership_id IN (${placeholders})`).run(...membershipIds);
-          db.prepare(`DELETE FROM payouts WHERE membership_id IN (${placeholders})`).run(...membershipIds);
-        }
-        db.prepare("DELETE FROM month_status WHERE group_id = ?").run(groupId);
-        db.prepare("DELETE FROM memberships WHERE group_id = ?").run(groupId);
-        db.prepare("DELETE FROM groups WHERE id = ?").run(groupId);
-      }
-
-      // 2. For other groups where they are just a member
-      const memberships = db.prepare("SELECT id FROM memberships WHERE user_id = ?").all(userId) as any[];
-      const membershipIds = memberships.map(m => m.id);
-
-      if (membershipIds.length > 0) {
-        const placeholders = membershipIds.map(() => "?").join(",");
-        db.prepare(`DELETE FROM payments WHERE membership_id IN (${placeholders})`).run(...membershipIds);
-        db.prepare(`DELETE FROM payouts WHERE membership_id IN (${placeholders})`).run(...membershipIds);
-      }
-
-      db.prepare("DELETE FROM memberships WHERE user_id = ?").run(userId);
-
-      // 3. Finally delete the user
-      db.prepare("DELETE FROM users WHERE id = ?").run(userId);
-    });
-
+  app.delete("/api/users/:id", async (req, res) => {
+    const userId = req.params.id;
     try {
-      transaction();
+      await supabase.from("users").delete().eq("id", userId);
       res.json({ success: true });
     } catch (e: any) {
+      console.error("User deletion failed:", e);
       res.status(500).json({ error: e.message });
     }
   });
 
   // Groups
-  app.get("/api/groups", (req, res) => {
+  app.get("/api/groups", async (req, res) => {
     const userId = req.query.userId;
-    const groups = getGroupsStmt.all(userId);
-    res.json(groups);
+    const { data: groups } = await supabase
+      .from("memberships")
+      .select(`
+        role,
+        payout_month_index,
+        groups (*)
+      `)
+      .eq("user_id", userId);
+    
+    // Flatten the response to match the old SQLite structure
+    const flattenedGroups = groups?.map((m: any) => ({
+      ...m.groups,
+      role: m.role,
+      payout_month_index: m.payout_month_index
+    })) || [];
+
+    res.json(flattenedGroups);
   });
 
-  app.post("/api/groups", (req, res) => {
+  app.post("/api/groups", async (req, res) => {
     const { name, contributionAmount, totalMembers, startDate, payoutDay, adminId, description, interestRate } = req.body;
     
-    const transaction = db.transaction(() => {
-      const groupInfo = db.prepare(`
-        INSERT INTO groups (name, contribution_amount, total_members, start_date, payout_day, admin_id, description, interest_rate)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(name, contributionAmount, totalMembers, startDate, payoutDay || 15, adminId, description, interestRate || 0);
-      
-      const groupId = groupInfo.lastInsertRowid;
-      
+    try {
+      // Verify admin exists
+      const { data: admin } = await supabase.from("users").select("id").eq("id", adminId).maybeSingle();
+      if (!admin) {
+        return res.status(400).json({ error: "Admin user not found. Please log in again." });
+      }
+
+      // Create group
+      const { data: group, error: groupError } = await supabase
+        .from("groups")
+        .insert({
+          name,
+          contribution_amount: contributionAmount,
+          total_members: totalMembers,
+          start_date: startDate,
+          payout_day: payoutDay || 15,
+          admin_id: adminId,
+          description,
+          interest_rate: interestRate || 0
+        })
+        .select()
+        .single();
+
+      if (groupError) throw groupError;
+
       // Add admin as first member
-      db.prepare(`
-        INSERT INTO memberships (user_id, group_id, role, payout_month_index)
-        VALUES (?, ?, 'admin', 0)
-      `).run(adminId, groupId);
+      const { error: memError } = await supabase
+        .from("memberships")
+        .insert({
+          user_id: adminId,
+          group_id: group.id,
+          role: 'admin',
+          payout_month_index: 0
+        });
 
-      return groupId;
-    });
+      if (memError) throw memError;
 
-    const groupId = transaction();
-    res.json({ id: groupId });
+      res.json({ id: group.id });
+    } catch (e: any) {
+      console.error("Group creation error:", e);
+      res.status(500).json({ error: e.message });
+    }
   });
 
-  app.get("/api/groups/:id", (req, res) => {
-    const group = db.prepare("SELECT * FROM groups WHERE id = ?").get(req.params.id);
-    const members = db.prepare(`
-      SELECT m.*, u.name, u.phone 
-      FROM memberships m
-      JOIN users u ON m.user_id = u.id
-      WHERE m.group_id = ?
-    `).all(req.params.id);
+  app.get("/api/groups/:id", async (req, res) => {
+    const { data: group } = await supabase.from("groups").select("*").eq("id", req.params.id).single();
+    const { data: members } = await supabase
+      .from("memberships")
+      .select(`
+        *,
+        users (name, phone)
+      `)
+      .eq("group_id", req.params.id);
     
-    res.json({ ...group, members });
+    // Flatten members
+    const flattenedMembers = members?.map((m: any) => ({
+      ...m,
+      name: m.users.name,
+      phone: m.users.phone
+    })) || [];
+    
+    res.json({ ...group, members: flattenedMembers });
   });
 
-  app.put("/api/groups/:id", (req, res) => {
+  app.put("/api/groups/:id", async (req, res) => {
     const { name, contributionAmount, payoutDay, interestRate, status } = req.body;
     try {
-      db.prepare("UPDATE groups SET name = ?, contribution_amount = ?, payout_day = ?, interest_rate = ?, status = ? WHERE id = ?")
-        .run(name, contributionAmount, payoutDay, interestRate || 0, status || 'active', req.params.id);
+      await supabase
+        .from("groups")
+        .update({
+          name,
+          contribution_amount: contributionAmount,
+          payout_day: payoutDay,
+          interest_rate: interestRate || 0,
+          status: status || 'active'
+        })
+        .eq("id", req.params.id);
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  app.delete("/api/groups/:id", (req, res) => {
+  app.delete("/api/groups/:id", async (req, res) => {
     const groupId = req.params.id;
-    
-    const transaction = db.transaction(() => {
-      // 1. Find all memberships for this group
-      const memberships = db.prepare("SELECT id FROM memberships WHERE group_id = ?").all(groupId) as any[];
-      const membershipIds = memberships.map(m => m.id);
-
-      if (membershipIds.length > 0) {
-        const placeholders = membershipIds.map(() => "?").join(",");
-        // 2. Delete payments
-        db.prepare(`DELETE FROM payments WHERE membership_id IN (${placeholders})`).run(...membershipIds);
-        // 3. Delete payouts
-        db.prepare(`DELETE FROM payouts WHERE membership_id IN (${placeholders})`).run(...membershipIds);
-      }
-
-      // 4. Delete month status
-      db.prepare("DELETE FROM month_status WHERE group_id = ?").run(groupId);
-
-      // 5. Delete memberships
-      db.prepare("DELETE FROM memberships WHERE group_id = ?").run(groupId);
-
-      // 6. Delete the group
-      db.prepare("DELETE FROM groups WHERE id = ?").run(groupId);
-    });
-
     try {
-      transaction();
+      await supabase.from("groups").delete().eq("id", groupId);
       res.json({ success: true });
     } catch (e: any) {
+      console.error("Group deletion failed:", e);
       res.status(500).json({ error: e.message });
     }
   });
 
   // Add Member
-  app.post("/api/groups/:id/members", (req, res) => {
+  app.post("/api/groups/:id/members", async (req, res) => {
     const { phone, name, payoutMonthIndex } = req.body;
     const groupId = req.params.id;
 
-    let user = db.prepare("SELECT * FROM users WHERE phone = ?").get(phone) as any;
-    if (!user) {
-      const info = db.prepare("INSERT INTO users (name, phone) VALUES (?, ?)").run(name, phone);
-      user = { id: info.lastInsertRowid, name, phone };
-    }
-
     try {
-      db.prepare(`
-        INSERT INTO memberships (user_id, group_id, role, payout_month_index)
-        VALUES (?, ?, 'member', ?)
-      `).run(user.id, groupId, payoutMonthIndex);
+      let { data: user } = await supabase.from("users").select("*").eq("phone", phone).maybeSingle();
+      if (!user) {
+        const { data: newUser, error } = await supabase.from("users").insert({ name, phone }).select().single();
+        if (error) throw error;
+        user = newUser;
+      }
+
+      await supabase
+        .from("memberships")
+        .insert({
+          user_id: user.id,
+          group_id: groupId,
+          role: 'member',
+          payout_month_index: payoutMonthIndex
+        });
       res.json({ success: true });
-    } catch (e) {
+    } catch (e: any) {
       res.status(400).json({ error: "Member already in group or index taken" });
     }
   });
 
-  app.post("/api/groups/:id/members/bulk", (req, res) => {
+  app.post("/api/groups/:id/members/bulk", async (req, res) => {
     const { members } = req.body; // Array of { name, phone, payoutMonthIndex }
     const groupId = req.params.id;
 
-    const transaction = db.transaction(() => {
+    try {
       for (const member of members) {
-        let user = db.prepare("SELECT * FROM users WHERE phone = ?").get(member.phone) as any;
+        let { data: user } = await supabase.from("users").select("*").eq("phone", member.phone).maybeSingle();
         if (!user) {
-          const info = db.prepare("INSERT INTO users (name, phone) VALUES (?, ?)").run(member.name, member.phone);
-          user = { id: info.lastInsertRowid, name: member.name, phone: member.phone };
+          const { data: newUser, error } = await supabase.from("users").insert({ name: member.name, phone: member.phone }).select().single();
+          if (error) throw error;
+          user = newUser;
         }
         
-        db.prepare(`
-          INSERT INTO memberships (user_id, group_id, role, payout_month_index)
-          VALUES (?, ?, 'member', ?)
-        `).run(user.id, groupId, member.payoutMonthIndex);
+        await supabase
+          .from("memberships")
+          .insert({
+            user_id: user.id,
+            group_id: groupId,
+            role: 'member',
+            payout_month_index: member.payoutMonthIndex
+          });
       }
-    });
-
-    try {
-      transaction();
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -322,37 +335,33 @@ async function startServer() {
   });
 
   // Update Member
-  app.put("/api/memberships/:id", (req, res) => {
+  app.put("/api/memberships/:id", async (req, res) => {
     const { name, phone, payoutMonthIndex } = req.body;
     const membershipId = req.params.id;
 
-    const transaction = db.transaction(() => {
-      const membership = db.prepare("SELECT user_id, group_id, payout_month_index FROM memberships WHERE id = ?").get(membershipId) as any;
+    try {
+      const { data: membership } = await supabase.from("memberships").select("user_id, group_id, payout_month_index").eq("id", membershipId).single();
       if (!membership) throw new Error("Membership not found");
 
       // Update user details
-      db.prepare("UPDATE users SET name = ?, phone = ? WHERE id = ?").run(name, phone, membership.user_id);
+      await supabase.from("users").update({ name, phone }).eq("id", membership.user_id);
 
       // If payout month is changing, check for swap
       if (payoutMonthIndex !== undefined && payoutMonthIndex !== membership.payout_month_index) {
-        // Find if someone else has the target month in the same group
-        const otherMember = db.prepare("SELECT id FROM memberships WHERE group_id = ? AND payout_month_index = ? AND id != ?")
-          .get(membership.group_id, payoutMonthIndex, membershipId) as any;
+        const { data: otherMember } = await supabase
+          .from("memberships")
+          .select("id")
+          .eq("group_id", membership.group_id)
+          .eq("payout_month_index", payoutMonthIndex)
+          .neq("id", membershipId)
+          .maybeSingle();
 
         if (otherMember) {
-          // Swap: Move the other member to the current member's old month
-          db.prepare("UPDATE memberships SET payout_month_index = ? WHERE id = ?")
-            .run(membership.payout_month_index, otherMember.id);
+          await supabase.from("memberships").update({ payout_month_index: membership.payout_month_index }).eq("id", otherMember.id);
         }
 
-        // Update current member to new month
-        db.prepare("UPDATE memberships SET payout_month_index = ? WHERE id = ?")
-          .run(payoutMonthIndex, membershipId);
+        await supabase.from("memberships").update({ payout_month_index: payoutMonthIndex }).eq("id", membershipId);
       }
-    });
-
-    try {
-      transaction();
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -360,161 +369,158 @@ async function startServer() {
   });
 
   // Payments
-  app.get("/api/groups/:id/payments", (req, res) => {
-    const payments = db.prepare(`
-      SELECT p.*, u.name as member_name
-      FROM payments p
-      JOIN memberships m ON p.membership_id = m.id
-      JOIN users u ON m.user_id = u.id
-      WHERE m.group_id = ?
-    `).all(req.params.id);
-    res.json(payments);
+  app.get("/api/groups/:id/payments", async (req, res) => {
+    const { data: payments } = await supabase
+      .from("payments")
+      .select(`
+        *,
+        memberships!inner (
+          group_id,
+          users (name)
+        )
+      `)
+      .eq("memberships.group_id", req.params.id);
+    
+    const flattenedPayments = payments?.map((p: any) => ({
+      ...p,
+      member_name: p.memberships.users.name
+    })) || [];
+
+    res.json(flattenedPayments);
   });
 
-  app.post("/api/payments", (req, res) => {
+  app.post("/api/payments", async (req, res) => {
     const { membershipId, monthIndex, amount, status, paidAt: customPaidAt, paymentMethod } = req.body;
     const paidAt = customPaidAt || (status === 'paid' ? new Date().toISOString() : null);
     
-    const existing = db.prepare("SELECT id FROM payments WHERE membership_id = ? AND month_index = ?").get(membershipId, monthIndex) as any;
-    
-    if (existing) {
-      db.prepare("UPDATE payments SET status = ?, paid_at = ?, payment_method = ? WHERE id = ?").run(status, paidAt, paymentMethod, existing.id);
-    } else {
-      db.prepare("INSERT INTO payments (membership_id, month_index, amount, status, paid_at, payment_method) VALUES (?, ?, ?, ?, ?, ?)").run(membershipId, monthIndex, amount, status, paidAt, paymentMethod);
+    try {
+      const { data: existing } = await supabase
+        .from("payments")
+        .select("id")
+        .eq("membership_id", membershipId)
+        .eq("month_index", monthIndex)
+        .maybeSingle();
+      
+      if (existing) {
+        await supabase
+          .from("payments")
+          .update({ status, paid_at: paidAt, payment_method: paymentMethod })
+          .eq("id", existing.id);
+      } else {
+        await supabase
+          .from("payments")
+          .insert({ membership_id: membershipId, month_index: monthIndex, amount, status, paid_at: paidAt, payment_method: paymentMethod });
+      }
+      
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
-    
-    res.json({ success: true });
   });
 
-  app.post("/api/groups/:id/payments/bulk", (req, res) => {
+  app.post("/api/groups/:id/payments/bulk", async (req, res) => {
     const { monthIndex, status } = req.body;
     const groupId = req.params.id;
     const paidAt = status === 'paid' ? new Date().toISOString() : null;
 
-    const transaction = db.transaction(() => {
-      const members = db.prepare("SELECT id FROM memberships WHERE group_id = ?").all(groupId) as any[];
-      const group = db.prepare("SELECT contribution_amount FROM groups WHERE id = ?").get(groupId) as any;
+    try {
+      const { data: members } = await supabase.from("memberships").select("id").eq("group_id", groupId);
+      const { data: group } = await supabase.from("groups").select("contribution_amount").eq("id", groupId).single();
+
+      if (!members || !group) throw new Error("Group or members not found");
 
       for (const member of members) {
-        const existing = db.prepare("SELECT id FROM payments WHERE membership_id = ? AND month_index = ?").get(member.id, monthIndex) as any;
+        const { data: existing } = await supabase
+          .from("payments")
+          .select("id")
+          .eq("membership_id", member.id)
+          .eq("month_index", monthIndex)
+          .maybeSingle();
+
         if (existing) {
-          db.prepare("UPDATE payments SET status = ?, paid_at = ? WHERE id = ?").run(status, paidAt, existing.id);
+          await supabase.from("payments").update({ status, paid_at: paidAt }).eq("id", existing.id);
         } else {
-          db.prepare("INSERT INTO payments (membership_id, month_index, amount, status, paid_at) VALUES (?, ?, ?, ?, ?)").run(member.id, monthIndex, group.contribution_amount, status, paidAt);
+          await supabase.from("payments").insert({ 
+            membership_id: member.id, 
+            month_index: monthIndex, 
+            amount: group.contribution_amount, 
+            status, 
+            paid_at: paidAt 
+          });
         }
       }
-    });
-
-    try {
-      transaction();
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  app.get("/api/groups/:id/month-status", (req, res) => {
-    const statuses = db.prepare("SELECT * FROM month_status WHERE group_id = ?").all(req.params.id);
-    res.json(statuses);
+  app.get("/api/groups/:id/month-status", async (req, res) => {
+    const { data: statuses } = await supabase.from("month_status").select("*").eq("group_id", req.params.id);
+    res.json(statuses || []);
   });
 
-  app.post("/api/groups/:id/month-status", (req, res) => {
+  app.post("/api/groups/:id/month-status", async (req, res) => {
     const { monthIndex, status } = req.body;
-    db.prepare(`
-      INSERT INTO month_status (group_id, month_index, status)
-      VALUES (?, ?, ?)
-      ON CONFLICT(group_id, month_index) DO UPDATE SET status = excluded.status
-    `).run(req.params.id, monthIndex, status);
-    res.json({ success: true });
-  });
-
-  // Backup & Restore
-  app.get("/api/backup", (req, res) => {
     try {
-      const data = {
-        users: db.prepare("SELECT * FROM users").all(),
-        groups: db.prepare("SELECT * FROM groups").all(),
-        memberships: db.prepare("SELECT * FROM memberships").all(),
-        payments: db.prepare("SELECT * FROM payments").all(),
-        payouts: db.prepare("SELECT * FROM payouts").all(),
-        month_status: db.prepare("SELECT * FROM month_status").all()
-      };
-      res.json(data);
+      await supabase
+        .from("month_status")
+        .upsert({ group_id: req.params.id, month_index: monthIndex, status }, { onConflict: 'group_id,month_index' });
+      res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  app.post("/api/restore", (req, res) => {
+  // Backup & Restore (Modified for Supabase)
+  app.get("/api/backup", async (req, res) => {
+    try {
+      const { data: users } = await supabase.from("users").select("*");
+      const { data: groups } = await supabase.from("groups").select("*");
+      const { data: memberships } = await supabase.from("memberships").select("*");
+      const { data: payments } = await supabase.from("payments").select("*");
+      const { data: payouts } = await supabase.from("payouts").select("*");
+      const { data: month_status } = await supabase.from("month_status").select("*");
+
+      res.json({ users, groups, memberships, payments, payouts, month_status });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/restore", async (req, res) => {
     const data = req.body;
-    console.log("Restore request received");
-    
     if (!data || typeof data !== 'object') {
-      console.error("Restore failed: Invalid data format");
       return res.status(400).json({ error: "Invalid backup data format." });
     }
 
     try {
-      console.log("Disabling foreign keys...");
-      db.exec("PRAGMA foreign_keys = OFF");
+      // Supabase doesn't easily support clearing all tables in one go via client
+      // This would ideally be an RPC call. For now, we'll do it sequentially.
+      // NOTE: This is dangerous and should be handled with care.
+      await supabase.from("payments").delete().neq("id", -1);
+      await supabase.from("payouts").delete().neq("id", -1);
+      await supabase.from("month_status").delete().neq("group_id", -1);
+      await supabase.from("memberships").delete().neq("id", -1);
+      await supabase.from("groups").delete().neq("id", -1);
+      await supabase.from("users").delete().neq("id", -1);
 
-      const transaction = db.transaction(() => {
-        console.log("Clearing existing tables...");
-        db.prepare("DELETE FROM payments").run();
-        db.prepare("DELETE FROM payouts").run();
-        db.prepare("DELETE FROM month_status").run();
-        db.prepare("DELETE FROM memberships").run();
-        db.prepare("DELETE FROM groups").run();
-        db.prepare("DELETE FROM users").run();
+      if (data.users) await supabase.from("users").insert(data.users);
+      if (data.groups) await supabase.from("groups").insert(data.groups);
+      if (data.memberships) await supabase.from("memberships").insert(data.memberships);
+      if (data.payments) await supabase.from("payments").insert(data.payments);
+      if (data.payouts) await supabase.from("payouts").insert(data.payouts);
+      if (data.month_status) await supabase.from("month_status").insert(data.month_status);
 
-        console.log("Restoring users...");
-        if (data.users && Array.isArray(data.users)) {
-          const stmt = db.prepare("INSERT INTO users (id, name, phone, created_at) VALUES (?, ?, ?, ?)");
-          data.users.forEach((u: any) => stmt.run(u.id, u.name, u.phone, u.created_at));
-        }
-        
-        console.log("Restoring groups...");
-        if (data.groups && Array.isArray(data.groups)) {
-          const stmt = db.prepare("INSERT INTO groups (id, name, contribution_amount, total_members, start_date, payout_day, description, interest_rate, status, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-          data.groups.forEach((g: any) => stmt.run(g.id, g.name, g.contribution_amount, g.total_members, g.start_date, g.payout_day, g.description, g.interest_rate, g.status, g.admin_id));
-        }
-        
-        console.log("Restoring memberships...");
-        if (data.memberships && Array.isArray(data.memberships)) {
-          const stmt = db.prepare("INSERT INTO memberships (id, user_id, group_id, role, payout_month_index, status) VALUES (?, ?, ?, ?, ?, ?)");
-          data.memberships.forEach((m: any) => stmt.run(m.id, m.user_id, m.group_id, m.role, m.payout_month_index, m.status));
-        }
-        
-        console.log("Restoring payments...");
-        if (data.payments && Array.isArray(data.payments)) {
-          const stmt = db.prepare("INSERT INTO payments (id, membership_id, month_index, amount, status, paid_at, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)");
-          data.payments.forEach((p: any) => stmt.run(p.id, p.membership_id, p.month_index, p.amount, p.status, p.paid_at, p.payment_method));
-        }
-        
-        console.log("Restoring payouts...");
-        if (data.payouts && Array.isArray(data.payouts)) {
-          const stmt = db.prepare("INSERT INTO payouts (id, membership_id, month_index, amount, status, paid_at) VALUES (?, ?, ?, ?, ?, ?)");
-          data.payouts.forEach((p: any) => stmt.run(p.id, p.membership_id, p.month_index, p.amount, p.status, p.paid_at));
-        }
-        
-        console.log("Restoring month status...");
-        if (data.month_status && Array.isArray(data.month_status)) {
-          const stmt = db.prepare("INSERT INTO month_status (group_id, month_index, status) VALUES (?, ?, ?)");
-          data.month_status.forEach((ms: any) => stmt.run(ms.group_id, ms.month_index, ms.status));
-        }
-      });
-
-      console.log("Executing restore transaction...");
-      transaction();
-      console.log("Restore successful");
       res.json({ success: true });
     } catch (e: any) {
-      console.error("Restore failed with error:", e);
       res.status(500).json({ error: "Database restore failed: " + e.message });
-    } finally {
-      console.log("Re-enabling foreign keys...");
-      db.exec("PRAGMA foreign_keys = ON");
     }
+  });
+
+  // Catch-all for undefined /api routes
+  app.all("/api/*", (req, res) => {
+    res.status(404).json({ error: `API route not found: ${req.method} ${req.url}` });
   });
 
   // --- Vite Integration ---
@@ -533,6 +539,101 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  // --- Push Notification Logic ---
+  const sendNotification = async (userId: number, title: string, body: string, url: string = "/") => {
+    const { data: subscriptions } = await supabase.from("push_subscriptions").select("subscription").eq("user_id", userId);
+    
+    if (!subscriptions) return;
+
+    for (const subRecord of subscriptions) {
+      try {
+        const subscription = subRecord.subscription;
+        await webpush.sendNotification(subscription, JSON.stringify({
+          title,
+          body,
+          url
+        }));
+      } catch (error: any) {
+        if (error.statusCode === 404 || error.statusCode === 410) {
+          await supabase.from("push_subscriptions").delete().eq("user_id", userId).eq("subscription", subRecord.subscription);
+        } else {
+          console.error("Error sending push notification:", error);
+        }
+      }
+    }
+  };
+
+  // Cron job (Modified for Supabase)
+  cron.schedule("0 9 * * *", async () => {
+    if (!supabase) {
+      console.warn("Cron job skipped: Supabase is not configured.");
+      return;
+    }
+    console.log("Running daily notification check...");
+    const today = new Date();
+    const currentDay = today.getDate();
+    
+    const { data: groupsToRemind } = await supabase.from("groups").select("*").eq("status", "active");
+
+    if (!groupsToRemind) return;
+
+    for (const group of groupsToRemind) {
+      const reminderDay = group.payout_day - 2;
+      if (currentDay === reminderDay) {
+        const startDate = new Date(group.start_date);
+        const monthsDiff = (today.getFullYear() - startDate.getFullYear()) * 12 + (today.getMonth() - startDate.getMonth());
+        
+        if (monthsDiff >= 0 && monthsDiff < group.total_members) {
+          // This complex query is better handled with a view or RPC in Supabase
+          // For now, we'll fetch memberships and then filter
+          const { data: members } = await supabase
+            .from("memberships")
+            .select(`
+              user_id,
+              users (name),
+              payments (status, month_index)
+            `)
+            .eq("group_id", group.id);
+
+          const unpaidMembers = members?.filter((m: any) => {
+            const payment = m.payments?.find((p: any) => p.month_index === monthsDiff);
+            return !payment || payment.status !== 'paid';
+          }) || [];
+
+          for (const member of unpaidMembers) {
+            await sendNotification(
+              member.user_id,
+              "Contribution Reminder",
+              `Hi ${member.users.name}, your contribution of ₹${group.contribution_amount} for ${group.name} is due in 2 days.`
+            );
+          }
+        }
+      }
+
+      if (currentDay === group.payout_day) {
+        const startDate = new Date(group.start_date);
+        const monthsDiff = (today.getFullYear() - startDate.getFullYear()) * 12 + (today.getMonth() - startDate.getMonth());
+
+        if (monthsDiff >= 0 && monthsDiff < group.total_members) {
+          const { data: payoutMember } = await supabase
+            .from("memberships")
+            .select("user_id, users (name)")
+            .eq("group_id", group.id)
+            .eq("payout_month_index", monthsDiff)
+            .maybeSingle();
+
+          if (payoutMember) {
+            await sendNotification(
+              payoutMember.user_id,
+              "Payout Day!",
+              `Congratulations ${(payoutMember as any).users.name}! Today is your payout day for ${group.name}.`
+            );
+          }
+        }
+      }
+    }
   });
 }
 
