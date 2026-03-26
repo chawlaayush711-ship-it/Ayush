@@ -52,10 +52,23 @@ async function startServer() {
   app.use("/api", (req, res, next) => {
     if (!supabase) {
       return res.status(500).json({ 
-        error: "Supabase is not configured. Please add SUPABASE_URL and SUPABASE_KEY to your secrets." 
+        error: "Supabase is not configured. Please add SUPABASE_URL and SUPABASE_KEY to your Vercel Environment Variables." 
       });
     }
     next();
+  });
+
+  app.get("/api/health", (req, res) => {
+    res.json({
+      status: "ok",
+      supabase: !!supabase,
+      env: {
+        SUPABASE_URL: !!process.env.SUPABASE_URL,
+        SUPABASE_KEY: !!process.env.SUPABASE_KEY,
+        VAPID_PUBLIC_KEY: !!process.env.VAPID_PUBLIC_KEY,
+        VAPID_PRIVATE_KEY: !!process.env.VAPID_PRIVATE_KEY,
+      }
+    });
   });
 
   // --- API Routes ---
@@ -636,6 +649,13 @@ async function startServer() {
       }
     }
   });
+
+  return app;
 }
 
-startServer();
+const appPromise = startServer();
+
+export default async (req: any, res: any) => {
+  const app = await appPromise;
+  app(req, res);
+};
