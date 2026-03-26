@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { motion } from "motion/react";
 import { User, Group } from "@/src/types";
+import { safeFetch } from "@/lib/api";
 
 interface DashboardProps {
   user: User;
@@ -29,29 +30,22 @@ export const Dashboard = ({ user, onSelectGroup, onCreateGroup, theme, t }: Dash
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchGroups = () => {
+  const fetchGroups = async () => {
     if (!user?.id) {
       setLoading(false);
       return;
     }
     setLoading(true);
     setError(null);
-    fetch(`/api/groups?userId=${user.id}`)
-      .then(async res => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Failed to fetch");
-        return data;
-      })
-      .then(data => {
-        setGroups(Array.isArray(data) ? data : []);
-      })
-      .catch(err => {
-        console.error("Dashboard fetch error:", err);
-        setError(err.message || "Failed to load your groups. Please try again.");
-      })
-      .finally(() => {
-        setLoading(false);
-      });
+    try {
+      const data = await safeFetch(`/api/groups?userId=${user.id}`);
+      setGroups(Array.isArray(data) ? data : []);
+    } catch (err: any) {
+      console.error("Dashboard fetch error:", err);
+      setError(err.message || "Failed to load your groups. Please try again.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {

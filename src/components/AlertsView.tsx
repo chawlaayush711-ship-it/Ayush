@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { motion } from "motion/react";
 import { User, Group } from "@/src/types";
+import { safeFetch } from "@/lib/api";
 
 interface AlertsViewProps {
   user: User;
@@ -25,13 +26,7 @@ export const AlertsView = ({ user, theme, t, onSelectGroup }: AlertsViewProps) =
     const fetchAlerts = async () => {
       setLoading(true);
       try {
-        const res = await fetch(`/api/groups?userId=${user.id}`);
-        const data = await res.json();
-        
-        if (!res.ok) {
-          throw new Error(data.error || "Failed to fetch groups");
-        }
-
+        const data = await safeFetch(`/api/groups?userId=${user.id}`);
         const groups: Group[] = Array.isArray(data) ? data : [];
         
         const newAlerts: any[] = [];

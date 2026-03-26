@@ -41,6 +41,7 @@ import jsPDF from "jspdf";
 import { domToPng } from "modern-screenshot";
 import { GoogleGenAI } from "@google/genai";
 import { translations, Language } from "./i18n";
+import { safeFetch } from "@/lib/api";
 import { 
   ResponsiveContainer, 
   LineChart, 
@@ -103,19 +104,6 @@ const THEMES = [
   { id: 'blue', color: 'bg-blue-600', hover: 'hover:bg-blue-700', text: 'text-blue-600', light: 'bg-blue-50', shadow: 'shadow-blue-100', border: 'border-blue-200', ring: 'focus:ring-blue-500' },
 ];
 
-// --- Helper Functions ---
-const safeFetch = async (url: string, options?: RequestInit) => {
-  const res = await fetch(url, options);
-  const contentType = res.headers.get("content-type");
-  if (contentType && contentType.includes("application/json")) {
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || `Request failed with status ${res.status}`);
-    return data;
-  }
-  if (!res.ok) throw new Error(`Request failed with status ${res.status} (non-JSON response)`);
-  return null;
-};
-
 // --- Components ---
 
 const Auth = ({ onLogin }: { onLogin: (user: User) => void }) => {
@@ -136,18 +124,12 @@ const Auth = ({ onLogin }: { onLogin: (user: User) => void }) => {
         throw new Error("Please enter a valid 10-digit phone number.");
       }
 
-      const res = await fetch("/api/auth/login", {
+      const user = await safeFetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: normalizedPhone, name }),
       });
 
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "Login failed. Please try again.");
-      }
-
-      const user = await res.json();
       localStorage.setItem("bhishi_user", JSON.stringify(user));
       onLogin(user);
       // No setLoading(false) here to avoid a flash before the component unmounts
@@ -256,13 +238,7 @@ const AlertsView = ({ user, theme, t, onSelectGroup }: { user: User, theme: any,
   useEffect(() => {
     const fetchAlerts = async () => {
       try {
-        const res = await fetch(`/api/groups?userId=${user.id}`);
-        const data = await res.json();
-        
-        if (!res.ok) {
-          throw new Error(data.error || "Failed to fetch groups");
-        }
-
+        const data = await safeFetch(`/api/groups?userId=${user.id}`);
         const groups: Group[] = Array.isArray(data) ? data : [];
         
         const newAlerts: any[] = [];
@@ -668,12 +644,12 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
   useEffect(() => {
     if (!group.id) return;
     setIsSyncing(true);
-    fetch(`/api/groups/${group.id}`).then(res => res.json()).then(d => {
-      setDetails(d);
+    safeFetch(`/api/groups/${group.id}`).then(d => {
+      if (d) setDetails(d);
       setIsSyncing(false);
     });
-    fetch(`/api/groups/${group.id}/payments`).then(res => res.json()).then(setPayments);
-    fetch(`/api/groups/${group.id}/month-status`).then(res => res.json()).then(setMonthStatuses);
+    safeFetch(`/api/groups/${group.id}/payments`).then(setPayments);
+    safeFetch(`/api/groups/${group.id}/month-status`).then(setMonthStatuses);
   }, [group.id]);
 
   const currentMonthStatus = monthStatuses.find(s => s.month_index === selectedMonthIndex)?.status || 'open';
@@ -684,12 +660,12 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
   const toggleMonthFreeze = async () => {
     if (isGroupEnded) return;
     const newStatus = isMonthFrozen ? 'open' : 'frozen';
-    await fetch(`/api/groups/${group.id}/month-status`, {
+    await safeFetch(`/api/groups/${group.id}/month-status`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ monthIndex: selectedMonthIndex, status: newStatus })
     });
-    fetch(`/api/groups/${group.id}/month-status`).then(res => res.json()).then(setMonthStatuses);
+    safeFetch(`/api/groups/${group.id}/month-status`).then(setMonthStatuses);
   };
 
   const handleExportPDF = async () => {
@@ -717,7 +693,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
 
   const updatePaymentStatus = async (membershipId: number, monthIndex: number, status: 'paid' | 'pending' | 'late', paidAt?: string, paymentMethod?: string) => {
     if (isFrozen) return;
-    await fetch("/api/payments", {
+    await safeFetch("/api/payments", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ 
@@ -730,7 +706,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
       }),
     });
     // Refresh
-    fetch(`/api/groups/${group.id}/payments`).then(res => res.json()).then(setPayments);
+    safeFetch(`/api/groups/${group.id}/payments`).then(setPayments);
     setDatePickerFor(null);
   };
 
@@ -739,7 +715,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
 
   const markAllPaid = async () => {
     const newStatus = isAllPaid ? 'pending' : 'paid';
-    await fetch(`/api/groups/${group.id}/payments/bulk`, {
+    await safeFetch(`/api/groups/${group.id}/payments/bulk`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ 
@@ -748,12 +724,12 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
       }),
     });
     // Refresh
-    fetch(`/api/groups/${group.id}/payments`).then(res => res.json()).then(setPayments);
+    safeFetch(`/api/groups/${group.id}/payments`).then(setPayments);
   };
 
   const toggleGroupStatus = async () => {
     const newStatus = group.status === 'active' ? 'completed' : 'active';
-    const res = await fetch(`/api/groups/${group.id}`, {
+    const data = await safeFetch(`/api/groups/${group.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ 
@@ -764,14 +740,14 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
         status: newStatus
       }),
     });
-    if (res.ok) {
+    if (data) {
       setGroup({ ...group, status: newStatus });
     }
   };
 
   const handleUpdatePayoutDay = async () => {
     if (isGroupEnded) return;
-    const res = await fetch(`/api/groups/${group.id}`, {
+    const data = await safeFetch(`/api/groups/${group.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ 
@@ -782,15 +758,15 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
         status: group.status
       }),
     });
-    if (res.ok) {
+    if (data) {
       setGroup({ ...group, payout_day: parseInt(newPayoutDay) });
       setIsEditingPayoutDay(false);
     }
   };
 
   const handleDeleteGroup = async () => {
-    const res = await fetch(`/api/groups/${group.id}`, { method: 'DELETE' });
-    if (res.ok) {
+    const data = await safeFetch(`/api/groups/${group.id}`, { method: 'DELETE' });
+    if (data) {
       onBack();
     }
   };
@@ -798,7 +774,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
   const generateAiInsights = async () => {
     setIsGeneratingAi(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY! });
       const pendingMembers = details.members.filter((m: any) => 
         !payments.find(p => p.membership_id === m.id && p.month_index === selectedMonthIndex && p.status === 'paid')
       );
@@ -1832,7 +1808,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
                 const validMembers = newMemberInputs.filter(m => m.name.trim() !== "" && m.phone.trim() !== "");
                 if (validMembers.length === 0) return;
 
-                await fetch(`/api/groups/${group.id}/members/bulk`, {
+                await safeFetch(`/api/groups/${group.id}/members/bulk`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ members: validMembers })
@@ -1840,7 +1816,9 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
                 
                 setShowAddMember(false);
                 setNewMemberInputs([{ name: "", phone: "", payoutMonthIndex: details.members.length }]);
-                fetch(`/api/groups/${group.id}`).then(res => res.json()).then(setDetails);
+                safeFetch(`/api/groups/${group.id}`).then(d => {
+                  if (d) setDetails(d);
+                });
               }} className="space-y-6">
                 <div className="space-y-4">
                   {newMemberInputs.map((input, idx) => (
@@ -1968,7 +1946,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
               <form onSubmit={async (e) => {
                 e.preventDefault();
                 const formData = new FormData(e.currentTarget);
-                await fetch(`/api/memberships/${editingMember.id}`, {
+                await safeFetch(`/api/memberships/${editingMember.id}`, {
                   method: "PUT",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -1978,7 +1956,9 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
                   })
                 });
                 setEditingMember(null);
-                fetch(`/api/groups/${group.id}`).then(res => res.json()).then(setDetails);
+                safeFetch(`/api/groups/${group.id}`).then(d => {
+                  if (d) setDetails(d);
+                });
               }} className="space-y-4">
                 <div>
                   <label className="block text-xs font-bold text-stone-400 uppercase mb-1">Name</label>
@@ -2038,7 +2018,7 @@ const CreateGroup = ({ user, onCancel, onSuccess, theme, t }: { user: User, onCa
     setError(null);
 
     try {
-      const res = await fetch("/api/groups", {
+      const data = await safeFetch("/api/groups", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2053,32 +2033,29 @@ const CreateGroup = ({ user, onCancel, onSuccess, theme, t }: { user: User, onCa
         }),
       });
       
-      if (res.ok) {
-        const { id: groupId } = await res.json();
+      if (data) {
+        const { id: groupId } = data;
         
         // Add other members (skipping the first one which is "You" and already added by backend)
         const otherMembers = memberInputs.slice(1).filter(m => m.name.trim() !== "");
         
         for (let i = 0; i < otherMembers.length; i++) {
-          const mRes = await fetch(`/api/groups/${groupId}/members`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: otherMembers[i].name,
-              phone: otherMembers[i].phone || `999000${Math.floor(Math.random() * 10000)}`, // Fallback if phone is optional
-              payoutMonthIndex: i + 1
-            }),
-          });
-          if (!mRes.ok) {
-            const mErr = await mRes.json();
-            console.warn("Failed to add member:", mErr.error);
+          try {
+            await safeFetch(`/api/groups/${groupId}/members`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: otherMembers[i].name,
+                phone: otherMembers[i].phone || `999000${Math.floor(Math.random() * 10000)}`, // Fallback if phone is optional
+                payoutMonthIndex: i + 1
+              }),
+            });
+          } catch (mErr: any) {
+            console.warn("Failed to add member:", mErr.message);
           }
         }
         
         onSuccess();
-      } else {
-        const errData = await res.json();
-        setError(errData.error || "Failed to create group");
       }
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred");
@@ -2286,13 +2263,14 @@ const Assistant = ({ user }: { user: User }) => {
     setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
     setLoading(true);
 
-    const res = await fetch("/api/assistant", {
+    const data = await safeFetch("/api/assistant", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: userMsg, context: { user } }),
     });
-    const data = await res.json();
-    setMessages(prev => [...prev, { role: 'ai', text: data.text }]);
+    if (data) {
+      setMessages(prev => [...prev, { role: 'ai', text: data.text }]);
+    }
     setLoading(false);
   };
 
@@ -2440,8 +2418,8 @@ Bhishi is a community-driven financial management platform designed to digitize 
   };
 
   const handleDelete = async () => {
-    const res = await fetch(`/api/users/${user.id}`, { method: 'DELETE' });
-    if (res.ok) {
+    const data = await safeFetch(`/api/users/${user.id}`, { method: 'DELETE' });
+    if (data) {
       onDeleteAccount();
     }
   };
@@ -2568,14 +2546,19 @@ Bhishi is a community-driven financial management platform designed to digitize 
           <div className="grid grid-cols-2 gap-3">
             <button 
               onClick={async () => {
-                const res = await fetch('/api/backup');
-                const data = await res.json();
-                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `bhishi-backup-${new Date().toISOString().split('T')[0]}.json`;
-                a.click();
+                try {
+                  const data = await safeFetch('/api/backup');
+                  if (data) {
+                    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `bhishi-backup-${new Date().toISOString().split('T')[0]}.json`;
+                    a.click();
+                  }
+                } catch (err: any) {
+                  alert("Failed to create backup: " + err.message);
+                }
               }}
               className="flex items-center justify-center gap-2 py-3 bg-stone-50 text-stone-600 font-bold rounded-xl hover:bg-stone-100 transition-all border border-stone-100"
             >
@@ -2594,21 +2577,18 @@ Bhishi is a community-driven financial management platform designed to digitize 
                   reader.onload = async (event) => {
                     try {
                       const data = JSON.parse(event.target?.result as string);
-                      const res = await fetch('/api/restore', {
+                      const resData = await safeFetch('/api/restore', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(data)
                       });
-                      if (res.ok) {
+                      if (resData) {
                         alert("Backup restored successfully! You will be logged out to refresh your session.");
                         onLogout();
                         window.location.reload();
-                      } else {
-                        const err = await res.json();
-                        alert("Failed to restore backup: " + (err.error || "Unknown error"));
                       }
-                    } catch (err) {
-                      alert("Error processing backup file: " + (err instanceof Error ? err.message : "Invalid format"));
+                    } catch (err: any) {
+                      alert("Error processing backup: " + err.message);
                     }
                   };
                   reader.readAsText(file);
@@ -2733,12 +2713,8 @@ export default function App() {
   // Verify user on startup
   useEffect(() => {
     if (user) {
-      fetch(`/api/auth/verify/${user.id}`).then(res => {
-        if (!res.ok) {
-          handleLogout();
-        }
-      }).catch(() => {
-        // If server is down, don't logout, just wait
+      safeFetch(`/api/auth/verify/${user.id}`).catch(() => {
+        handleLogout();
       });
     }
   }, []);
