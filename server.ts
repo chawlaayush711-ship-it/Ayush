@@ -52,16 +52,38 @@ async function startServer() {
   app.use("/api", (req, res, next) => {
     if (!supabase) {
       return res.status(500).json({ 
-        error: "Supabase is not configured. Please add SUPABASE_URL and SUPABASE_KEY to your Vercel Environment Variables." 
+        error: "Supabase is not configured.",
+        details: "SUPABASE_URL or SUPABASE_KEY is missing from environment variables.",
+        action: "Add these variables to your Vercel Dashboard (Settings -> Environment Variables) or your local .env file."
       });
     }
     next();
   });
 
-  app.get("/api/health", (req, res) => {
+  app.get("/api/health", async (req, res) => {
+    let dbStatus = "not_configured";
+    let dbError = null;
+
+    if (supabase) {
+      try {
+        const { error } = await supabase.from("users").select("count", { count: 'exact', head: true });
+        if (error) {
+          dbStatus = "error";
+          dbError = error.message;
+        } else {
+          dbStatus = "connected";
+        }
+      } catch (e: any) {
+        dbStatus = "exception";
+        dbError = e.message;
+      }
+    }
+
     res.json({
       status: "ok",
       supabase: !!supabase,
+      database: dbStatus,
+      dbError,
       env: {
         SUPABASE_URL: !!process.env.SUPABASE_URL,
         SUPABASE_KEY: !!process.env.SUPABASE_KEY,
