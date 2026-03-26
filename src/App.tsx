@@ -41,16 +41,31 @@ import jsPDF from "jspdf";
 import { domToPng } from "modern-screenshot";
 import { GoogleGenAI } from "@google/genai";
 import { translations, Language } from "./i18n";
+import { 
+  ResponsiveContainer, 
+  LineChart, 
+  Line, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  Legend, 
+  BarChart, 
+  Bar, 
+  Cell, 
+  PieChart, 
+  Pie 
+} from "recharts";
 
 // --- Types ---
 interface User {
-  id: number;
+  id: string;
   name: string;
   phone: string;
 }
 
 interface Group {
-  id: number;
+  id: string;
   name: string;
   contribution_amount: number;
   total_members: number;
@@ -62,14 +77,14 @@ interface Group {
 }
 
 interface Member extends User {
-  membership_id: number;
+  membership_id: string;
   role: string;
   payout_month_index: number;
 }
 
 interface Payment {
-  id: number;
-  membership_id: number;
+  id: string;
+  membership_id: string;
   month_index: number;
   amount: number;
   status: 'pending' | 'paid' | 'late';
@@ -87,6 +102,19 @@ const THEMES = [
   { id: 'violet', color: 'bg-violet-600', hover: 'hover:bg-violet-700', text: 'text-violet-600', light: 'bg-violet-50', shadow: 'shadow-violet-100', border: 'border-violet-200', ring: 'focus:ring-violet-500' },
   { id: 'blue', color: 'bg-blue-600', hover: 'hover:bg-blue-700', text: 'text-blue-600', light: 'bg-blue-50', shadow: 'shadow-blue-100', border: 'border-blue-200', ring: 'focus:ring-blue-500' },
 ];
+
+// --- Helper Functions ---
+const safeFetch = async (url: string, options?: RequestInit) => {
+  const res = await fetch(url, options);
+  const contentType = res.headers.get("content-type");
+  if (contentType && contentType.includes("application/json")) {
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Request failed with status ${res.status}`);
+    return data;
+  }
+  if (!res.ok) throw new Error(`Request failed with status ${res.status} (non-JSON response)`);
+  return null;
+};
 
 // --- Components ---
 
@@ -380,12 +408,7 @@ const Dashboard = ({ user, onSelectGroup, onCreateGroup, theme, t }: { user: Use
     }
     setLoading(true);
     setError(null);
-    fetch(`/api/groups?userId=${user.id}`)
-      .then(async res => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Failed to fetch");
-        return data;
-      })
+    safeFetch(`/api/groups?userId=${user.id}`)
       .then(data => {
         setGroups(Array.isArray(data) ? data : []);
       })
@@ -630,7 +653,7 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
   const [showDeleteGroupConfirm, setShowDeleteGroupConfirm] = useState(false);
   const [newMemberInputs, setNewMemberInputs] = useState([{ name: "", phone: "", payoutMonthIndex: 0 }]);
   const [monthStatuses, setMonthStatuses] = useState<any[]>([]);
-  const [datePickerFor, setDatePickerFor] = useState<{ membershipId: number, monthIndex: number } | null>(null);
+  const [datePickerFor, setDatePickerFor] = useState<{ membershipId: string, monthIndex: number } | null>(null);
   const [selectedPaidDate, setSelectedPaidDate] = useState(new Date().toISOString().split('T')[0]);
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'cash' | 'upi'>('cash');
   const [aiInsights, setAiInsights] = useState<string | null>(null);
@@ -1065,6 +1088,24 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
                 <p className="text-[10px] text-stone-400 font-bold uppercase tracking-widest">{totalPaidPayments} of {totalExpectedPayments} payments collected</p>
               </div>
 
+              <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-sm">
+                <h4 className="font-bold text-stone-900 mb-4">Payout Trend</h4>
+                <div className="h-48 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={months.map(m => ({ name: m.name.split(' ')[0], amount: getPayoutForMonth(m.index) }))}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f5f5f4" />
+                      <XAxis dataKey="name" fontSize={10} tick={{ fill: '#a8a29e' }} />
+                      <YAxis fontSize={10} tick={{ fill: '#a8a29e' }} />
+                      <Tooltip 
+                        contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.05)', fontSize: '12px' }}
+                        formatter={(value: number) => [`₹${value.toLocaleString()}`, 'Payout']}
+                      />
+                      <Line type="monotone" dataKey="amount" stroke={theme.id === 'emerald' ? '#059669' : theme.id === 'indigo' ? '#4f46e5' : '#e11d48'} strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
               <div className="bg-white rounded-3xl border border-stone-100 shadow-sm overflow-hidden">
                 <div className="p-5 border-b border-stone-50 flex justify-between items-center bg-stone-50/50">
                   <div className="flex flex-col">
@@ -1348,6 +1389,51 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
                     </select>
                   </>
                 )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-sm">
+                <h4 className="font-bold text-stone-900 mb-4 text-sm">Payment Distribution</h4>
+                <div className="h-48 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={[
+                          { name: 'Paid', value: payments.filter(p => p.status === 'paid').length },
+                          { name: 'Pending', value: (group.total_members * group.total_members) - payments.filter(p => p.status === 'paid').length }
+                        ]}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={60}
+                        outerRadius={80}
+                        paddingAngle={5}
+                        dataKey="value"
+                      >
+                        <Cell fill={theme.id === 'emerald' ? '#10b981' : theme.id === 'indigo' ? '#6366f1' : '#f43f5e'} />
+                        <Cell fill="#f5f5f4" />
+                      </Pie>
+                      <Tooltip />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+              <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-sm">
+                <h4 className="font-bold text-stone-900 mb-4 text-sm">Monthly Collection</h4>
+                <div className="h-48 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={months.slice(0, selectedMonthIndex + 1).map(m => ({
+                      name: m.name.split(' ')[0],
+                      paid: payments.filter(p => p.month_index === m.index && p.status === 'paid').length
+                    }))}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f5f5f4" vertical={false} />
+                      <XAxis dataKey="name" fontSize={8} tick={{ fill: '#a8a29e' }} />
+                      <YAxis fontSize={8} tick={{ fill: '#a8a29e' }} />
+                      <Tooltip cursor={{ fill: '#f5f5f4' }} />
+                      <Bar dataKey="paid" fill={theme.id === 'emerald' ? '#10b981' : theme.id === 'indigo' ? '#6366f1' : '#f43f5e'} radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -1646,30 +1732,55 @@ const GroupDetail = ({ group: initialGroup, user, onBack, t, theme }: { group: G
                 <p className="text-stone-400 font-medium animate-pulse">Analyzing group dynamics and generating smart reminders...</p>
               </div>
             ) : (
-              <div className="bg-white rounded-3xl border border-stone-100 shadow-sm p-6 prose prose-stone max-w-none">
-                <div className="markdown-body">
-                  {aiInsights ? (
-                    <div className="space-y-4">
-                      {aiInsights.split('\n').map((line, i) => (
-                        <div key={i} className="flex items-start justify-between gap-4 group">
-                          <p className="text-stone-700 leading-relaxed flex-1">{line}</p>
-                          {line.trim().length > 15 && (
-                            <button 
-                              onClick={() => {
-                                window.open(`https://wa.me/?text=${encodeURIComponent(line)}`);
-                              }}
-                              className="opacity-0 group-hover:opacity-100 p-2 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all shrink-0"
-                              title="Share to WhatsApp"
-                            >
-                              <Share2 className="w-4 h-4" />
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-stone-400 text-center py-8">No insights available. Click refresh to generate.</p>
-                  )}
+              <div className="space-y-6">
+                <div className="bg-white rounded-3xl border border-stone-100 shadow-sm p-6 prose prose-stone max-w-none">
+                  <div className="markdown-body">
+                    {aiInsights ? (
+                      <div className="space-y-4">
+                        {aiInsights.split('\n').map((line, i) => (
+                          <div key={i} className="flex items-start justify-between gap-4 group">
+                            <p className="text-stone-700 leading-relaxed flex-1">{line}</p>
+                            {line.trim().length > 15 && (
+                              <button 
+                                onClick={() => {
+                                  window.open(`https://wa.me/?text=${encodeURIComponent(line)}`);
+                                }}
+                                className="opacity-0 group-hover:opacity-100 p-2 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all shrink-0"
+                                title="Share to WhatsApp"
+                              >
+                                <Share2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-stone-400 text-center py-8">No insights available. Click refresh to generate.</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-white p-6 rounded-3xl border border-stone-100 shadow-sm">
+                  <h4 className="font-bold text-stone-900 mb-4 text-sm">Payment Consistency</h4>
+                  <div className="h-64 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={months.slice(0, selectedMonthIndex + 1).map(m => ({
+                        name: m.name.split(' ')[0],
+                        paid: payments.filter(p => p.month_index === m.index && p.status === 'paid').length,
+                        late: payments.filter(p => p.month_index === m.index && p.status === 'late').length,
+                        pending: group.total_members - payments.filter(p => p.month_index === m.index && (p.status === 'paid' || p.status === 'late')).length
+                      }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f5f5f4" vertical={false} />
+                        <XAxis dataKey="name" fontSize={10} tick={{ fill: '#a8a29e' }} />
+                        <YAxis fontSize={10} tick={{ fill: '#a8a29e' }} />
+                        <Tooltip cursor={{ fill: '#f5f5f4' }} />
+                        <Legend wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', paddingTop: '10px' }} />
+                        <Bar dataKey="paid" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]} />
+                        <Bar dataKey="late" stackId="a" fill="#f59e0b" radius={[0, 0, 0, 0]} />
+                        <Bar dataKey="pending" stackId="a" fill="#ef4444" radius={[4, 4, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
               </div>
             )}
@@ -2669,8 +2780,7 @@ export default function App() {
       const registration = await navigator.serviceWorker.register('/sw.js');
       console.log('Service Worker registered');
 
-      const res = await fetch('/api/push/vapid-public-key');
-      const { publicKey } = await res.json();
+      const { publicKey } = await safeFetch('/api/push/vapid-public-key');
 
       if (!publicKey) {
         console.warn('VAPID public key not found on server');
@@ -2682,7 +2792,7 @@ export default function App() {
         applicationServerKey: urlBase64ToUint8Array(publicKey)
       });
 
-      await fetch('/api/push/subscribe', {
+      await safeFetch('/api/push/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
